@@ -20,9 +20,10 @@ from urllib.request import Request, urlopen
 
 
 IPINFO_LOOKUP_URL = "https://ipinfo.io/"
-REQUEST_TIMEOUT_SECONDS = 20
-MAX_ATTEMPTS = 3
-LOOKUP_WORKERS = 8
+REQUEST_TIMEOUT_SECONDS = 30
+MAX_ATTEMPTS = 6
+LOOKUP_WORKERS = 64
+RETRY_DELAY_CAP_SECONDS = 30
 IPV4_LOOKUP_PREFIX = 24
 IPV6_LOOKUP_PREFIX = 48
 INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -56,6 +57,14 @@ def city_name(response: dict[str, object]) -> str | None:
     return None
 
 
+def retry_delay(error: HTTPError | None, attempt: int) -> float:
+    if error is not None:
+        retry_after = error.headers.get("Retry-After")
+        if retry_after and retry_after.isdigit():
+            return min(int(retry_after), RETRY_DELAY_CAP_SECONDS)
+    return min(2**attempt, RETRY_DELAY_CAP_SECONDS)
+
+
 def lookup_city(address: ipaddress.IPv4Address | ipaddress.IPv6Address, token: str) -> str | None:
     request = Request(
         f"{IPINFO_LOOKUP_URL}{quote(str(address), safe='')}/json",
@@ -78,13 +87,13 @@ def lookup_city(address: ipaddress.IPv4Address | ipaddress.IPv6Address, token: s
                 ) from error
             if error.code != 429 and not 500 <= error.code < 600:
                 raise RuntimeError(f"IPinfo lookup failed for {address}: HTTP {error.code}") from error
+            last_error: HTTPError | URLError | TimeoutError = error
         except (URLError, TimeoutError) as error:
-            if attempt == MAX_ATTEMPTS - 1:
-                raise RuntimeError(f"IPinfo lookup failed for {address}: {error}") from error
+            last_error = error
 
         if attempt == MAX_ATTEMPTS - 1:
-            raise RuntimeError(f"IPinfo lookup failed for {address} after {MAX_ATTEMPTS} attempts")
-        time.sleep(2**attempt)
+            raise RuntimeError(f"IPinfo lookup failed for {address}: {last_error}") from last_error
+        time.sleep(retry_delay(last_error if isinstance(last_error, HTTPError) else None, attempt))
 
     raise AssertionError("unreachable")
 
