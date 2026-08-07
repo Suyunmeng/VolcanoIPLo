@@ -6,17 +6,16 @@ from __future__ import annotations
 import argparse
 import hashlib
 import ipaddress
-import json
 import re
 import sys
+import threading
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import DefaultDict, Iterable
-from urllib.error import HTTPError, URLError
-from urllib.parse import quote
-from urllib.request import Request, urlopen
+
+import requests
 
 
 IPINFO_LOOKUP_URL = "https://ipinfo.io/"
@@ -24,6 +23,7 @@ REQUEST_TIMEOUT_SECONDS = 30
 MAX_ATTEMPTS = 6
 LOOKUP_WORKERS = 64
 RETRY_DELAY_CAP_SECONDS = 30
+SESSION_LOCAL = threading.local()
 IPV4_LOOKUP_PREFIX = 24
 IPV6_LOOKUP_PREFIX = 48
 INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -57,43 +57,55 @@ def city_name(response: dict[str, object]) -> str | None:
     return None
 
 
-def retry_delay(error: HTTPError | None, attempt: int) -> float:
-    if error is not None:
-        retry_after = error.headers.get("Retry-After")
+def retry_delay(response: requests.Response | None, attempt: int) -> float:
+    if response is not None:
+        retry_after = response.headers.get("Retry-After")
         if retry_after and retry_after.isdigit():
             return min(int(retry_after), RETRY_DELAY_CAP_SECONDS)
     return min(2**attempt, RETRY_DELAY_CAP_SECONDS)
 
 
+def session() -> requests.Session:
+    current = getattr(SESSION_LOCAL, "session", None)
+    if current is None:
+        current = requests.Session()
+        current.headers.update({"Accept": "application/json"})
+        SESSION_LOCAL.session = current
+    return current
+
+
 def lookup_city(address: ipaddress.IPv4Address | ipaddress.IPv6Address, token: str) -> str | None:
-    request = Request(
-        f"{IPINFO_LOOKUP_URL}{quote(str(address), safe='')}/json",
-        headers={"Accept": "application/json", "Authorization": f"Bearer {token}"},
-    )
+    url = f"{IPINFO_LOOKUP_URL}{address}/json"
+    headers = {"Authorization": f"Bearer {token}"}
 
     for attempt in range(MAX_ATTEMPTS):
+        response: requests.Response | None = None
         try:
-            with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
-                payload = json.load(response)
-            if not isinstance(payload, dict):
-                raise RuntimeError("IPinfo returned a non-object JSON response")
-            return city_name(payload)
-        except HTTPError as error:
-            if error.code in (400, 404):
+            response = session().get(url, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
+            if response.status_code in (400, 404):
                 return None
-            if error.code in (401, 403):
+            if response.status_code in (401, 403):
                 raise RuntimeError(
                     "IPinfo rejected the API token. Verify the IPINFO_TOKEN repository secret."
-                ) from error
-            if error.code != 429 and not 500 <= error.code < 600:
-                raise RuntimeError(f"IPinfo lookup failed for {address}: HTTP {error.code}") from error
-            last_error: HTTPError | URLError | TimeoutError = error
-        except (URLError, TimeoutError) as error:
+                )
+            if response.status_code != 429 and not 500 <= response.status_code < 600:
+                response.raise_for_status()
+            if response.status_code < 400:
+                payload = response.json()
+                if not isinstance(payload, dict):
+                    raise RuntimeError("IPinfo returned a non-object JSON response")
+                return city_name(payload)
+            last_error: Exception = RuntimeError(f"HTTP {response.status_code}")
+        except requests.HTTPError as error:
+            raise RuntimeError(
+                f"IPinfo lookup failed for {address}: HTTP {error.response.status_code}"
+            ) from error
+        except (requests.ConnectionError, requests.Timeout, requests.JSONDecodeError) as error:
             last_error = error
 
         if attempt == MAX_ATTEMPTS - 1:
             raise RuntimeError(f"IPinfo lookup failed for {address}: {last_error}") from last_error
-        time.sleep(retry_delay(last_error if isinstance(last_error, HTTPError) else None, attempt))
+        time.sleep(retry_delay(response, attempt))
 
     raise AssertionError("unreachable")
 
