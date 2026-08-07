@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import ipaddress
 import re
 import sys
@@ -111,12 +110,9 @@ def lookup_city(address: ipaddress.IPv4Address | ipaddress.IPv6Address, token: s
 
 
 def sampled_address(network: ipaddress.IPv4Network | ipaddress.IPv6Network) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
-    if network.num_addresses <= 2:
+    if network.num_addresses == 1:
         return network.network_address
-
-    digest = hashlib.sha256(str(network).encode("ascii")).digest()
-    offset = int.from_bytes(digest, "big") % (network.num_addresses - 2) + 1
-    return network.network_address + offset
+    return network.network_address + 1
 
 
 def lookup_region(

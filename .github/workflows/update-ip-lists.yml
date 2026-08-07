@@ -86,4 +86,4 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "chore: update Volcano Engine city IP lists"
-          git push origin "$TARGET_BRANCH"
+          git push --force origin "$TARGET_BRANCH"
