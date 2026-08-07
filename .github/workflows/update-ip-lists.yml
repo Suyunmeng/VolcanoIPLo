@@ -21,7 +21,7 @@ concurrency:
 jobs:
   update-ip-lists:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
 
     steps:
       - name: Check out repository
@@ -45,7 +45,7 @@ jobs:
             --output "$RUNNER_TEMP/volcanoengine46.txt" \
             https://github.com/Suyunmeng/china-operator-ip/raw/refs/heads/ip-lists/volcanoengine46.txt
 
-      - name: Generate city IP lists
+      - name: Generate city IP lists by sampled subnet
         env:
           IPINFO_TOKEN: ${{ secrets.IPINFO_TOKEN }}
         run: |

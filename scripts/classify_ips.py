@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Classify CIDR ranges by city using the IPinfo API."""
+"""Classify CIDR ranges by mainland city using the IPinfo API."""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import ipaddress
 import json
 import re
 import sys
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import DefaultDict, Iterable
 from urllib.error import HTTPError, URLError
@@ -20,6 +22,9 @@ from urllib.request import Request, urlopen
 IPINFO_LOOKUP_URL = "https://ipinfo.io/"
 REQUEST_TIMEOUT_SECONDS = 20
 MAX_ATTEMPTS = 3
+LOOKUP_WORKERS = 8
+IPV4_LOOKUP_PREFIX = 24
+IPV6_LOOKUP_PREFIX = 48
 INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 WHITESPACE = re.compile(r'\s+')
 
@@ -35,6 +40,10 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def city_name(response: dict[str, object]) -> str | None:
+    country = response.get("country")
+    if country != "CN":
+        return None
+
     geo = response.get("geo")
     if isinstance(geo, dict):
         city = geo.get("city")
@@ -42,7 +51,9 @@ def city_name(response: dict[str, object]) -> str | None:
             return city.strip()
 
     city = response.get("city")
-    return city.strip() if isinstance(city, str) and city.strip() else None
+    if isinstance(city, str) and city.strip():
+        return city.strip()
+    return None
 
 
 def lookup_city(address: ipaddress.IPv4Address | ipaddress.IPv6Address, token: str) -> str | None:
@@ -78,10 +89,19 @@ def lookup_city(address: ipaddress.IPv4Address | ipaddress.IPv6Address, token: s
     raise AssertionError("unreachable")
 
 
-def file_stem(location: str) -> str:
-    sanitized = INVALID_FILENAME_CHARS.sub("_", location).strip(". ")
-    sanitized = WHITESPACE.sub("_", sanitized)
-    return sanitized or "Unknown"
+def sampled_address(network: ipaddress.IPv4Network | ipaddress.IPv6Network) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    if network.num_addresses <= 2:
+        return network.network_address
+
+    digest = hashlib.sha256(str(network).encode("ascii")).digest()
+    offset = int.from_bytes(digest, "big") % (network.num_addresses - 2) + 1
+    return network.network_address + offset
+
+
+def lookup_region(
+    network: ipaddress.IPv4Network | ipaddress.IPv6Network, token: str
+) -> str | None:
+    return lookup_city(sampled_address(network), token)
 
 
 def read_networks(input_path: Path) -> Iterable[ipaddress.IPv4Network | ipaddress.IPv6Network]:
@@ -96,32 +116,70 @@ def read_networks(input_path: Path) -> Iterable[ipaddress.IPv4Network | ipaddres
                 print(f"Skipping invalid CIDR at line {line_number}: {value}", file=sys.stderr)
 
 
+def file_stem(location: str) -> str:
+    sanitized = INVALID_FILENAME_CHARS.sub("_", location).strip(". ")
+    sanitized = WHITESPACE.sub("_", sanitized)
+    return sanitized or "Unknown"
+
+
+def split_network(
+    network: ipaddress.IPv4Network | ipaddress.IPv6Network,
+) -> Iterable[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+    lookup_prefix = IPV4_LOOKUP_PREFIX if network.version == 4 else IPV6_LOOKUP_PREFIX
+    if network.prefixlen >= lookup_prefix:
+        yield network
+        return
+    yield from network.subnets(new_prefix=lookup_prefix)
+
+
+def collapse_networks(
+    networks: Iterable[ipaddress.IPv4Network | ipaddress.IPv6Network],
+) -> set[str]:
+    return {str(network) for network in ipaddress.collapse_addresses(networks)}
+
+
 def classify(
     networks: Iterable[ipaddress.IPv4Network | ipaddress.IPv6Network], token: str
 ) -> tuple[DefaultDict[str, set[str]], DefaultDict[str, set[str]]]:
-    ipv4_by_city: DefaultDict[str, set[str]] = defaultdict(set)
-    ipv6_by_city: DefaultDict[str, set[str]] = defaultdict(set)
+    subnetworks = sorted(
+        {subnetwork for network in networks for subnetwork in split_network(network)},
+        key=lambda network: (network.version, int(network.network_address), network.prefixlen),
+    )
 
+    with ThreadPoolExecutor(max_workers=LOOKUP_WORKERS) as executor:
+        locations = list(executor.map(lambda network: lookup_region(network, token), subnetworks))
+
+    ipv4_by_location: DefaultDict[str, list[ipaddress.IPv4Network]] = defaultdict(list)
+    ipv6_by_location: DefaultDict[str, list[ipaddress.IPv6Network]] = defaultdict(list)
     skipped_ipv4 = 0
     skipped_ipv6 = 0
 
-    for network in networks:
-        location = lookup_city(network.network_address, token)
+    for network, location in zip(subnetworks, locations):
         if location is None:
             if network.version == 4:
                 skipped_ipv4 += 1
             else:
                 skipped_ipv6 += 1
             continue
-
-        target = ipv4_by_city if network.version == 4 else ipv6_by_city
-        target[location].add(str(network))
+        if network.version == 4:
+            ipv4_by_location[location].append(network)
+        else:
+            ipv6_by_location[location].append(network)
 
     print(
-        f"Skipped {skipped_ipv4} IPv4 and {skipped_ipv6} IPv6 ranges without city-level data.",
+        f"Skipped {skipped_ipv4} IPv4 and {skipped_ipv6} IPv6 subnets outside mainland China or without city data.",
         file=sys.stderr,
     )
-    return ipv4_by_city, ipv6_by_city
+    return (
+        defaultdict(set, {
+            location: collapse_networks(items)
+            for location, items in ipv4_by_location.items()
+        }),
+        defaultdict(set, {
+            location: collapse_networks(items)
+            for location, items in ipv6_by_location.items()
+        }),
+    )
 
 
 def network_sort_key(value: str) -> tuple[int, int, int]:
