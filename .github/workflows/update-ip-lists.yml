@@ -1,0 +1,96 @@
+name: Update Volcano Engine IP lists
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/update-ip-lists.yml"
+      - "scripts/classify_ips.py"
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-volcano-engine-ip-lists
+  cancel-in-progress: false
+
+jobs:
+  update-ip-lists:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install --disable-pip-version-check geoip2
+
+      - name: Restore GeoLite2 database cache
+        id: geolite-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/GeoLite2-City.mmdb
+          key: geolite2-city-${{ runner.os }}-v1
+
+      - name: Download GeoLite2 City database
+        if: steps.geolite-cache.outputs.cache-hit != 'true'
+        run: |
+          curl --fail --location --retry 3 --retry-all-errors \
+            --output "$RUNNER_TEMP/GeoLite2-City.mmdb" \
+            https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-City.mmdb
+
+      - name: Download Volcano Engine IP ranges
+        run: |
+          curl --fail --location --retry 3 --retry-all-errors \
+            --output "$RUNNER_TEMP/volcanoengine46.txt" \
+            https://github.com/Suyunmeng/china-operator-ip/raw/refs/heads/ip-lists/volcanoengine46.txt
+
+      - name: Generate city IP lists
+        run: |
+          rm -rf "$RUNNER_TEMP/ip-list"
+          python scripts/classify_ips.py \
+            --input "$RUNNER_TEMP/volcanoengine46.txt" \
+            --database "$RUNNER_TEMP/GeoLite2-City.mmdb" \
+            --output-dir "$RUNNER_TEMP/ip-list"
+
+      - name: Publish changed lists
+        env:
+          TARGET_BRANCH: ip-list
+        run: |
+          git fetch origin "$TARGET_BRANCH" || true
+          if git show-ref --verify --quiet "refs/remotes/origin/$TARGET_BRANCH"; then
+            git switch --create "$TARGET_BRANCH" --track "origin/$TARGET_BRANCH"
+          else
+            git switch --orphan "$TARGET_BRANCH"
+            git rm -rf . >/dev/null 2>&1 || true
+          fi
+
+          shopt -s nullglob
+          for file in *-4.txt *-6.txt *-46.txt; do
+            rm -f -- "$file"
+          done
+          cp "$RUNNER_TEMP"/ip-list/*.txt .
+
+          git add --all -- '*.txt'
+          if git diff --cached --quiet; then
+            echo "No IP-list changes to publish."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore: update Volcano Engine city IP lists"
+          git push origin "$TARGET_BRANCH"
