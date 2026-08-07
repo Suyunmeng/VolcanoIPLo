@@ -17,7 +17,7 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 
-IPINFO_LOOKUP_URL = "https://api.ipinfo.io/lookup/"
+IPINFO_LOOKUP_URL = "https://ipinfo.io/"
 REQUEST_TIMEOUT_SECONDS = 20
 MAX_ATTEMPTS = 3
 INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -47,7 +47,7 @@ def city_name(response: dict[str, object]) -> str | None:
 
 def lookup_city(address: ipaddress.IPv4Address | ipaddress.IPv6Address, token: str) -> str | None:
     request = Request(
-        f"{IPINFO_LOOKUP_URL}{quote(str(address), safe='')}",
+        f"{IPINFO_LOOKUP_URL}{quote(str(address), safe='')}/json",
         headers={"Accept": "application/json", "Authorization": f"Bearer {token}"},
     )
 
@@ -59,8 +59,12 @@ def lookup_city(address: ipaddress.IPv4Address | ipaddress.IPv6Address, token: s
                 raise RuntimeError("IPinfo returned a non-object JSON response")
             return city_name(payload)
         except HTTPError as error:
-            if error.code in (400, 401, 403, 404):
-                raise RuntimeError(f"IPinfo lookup failed for {address}: HTTP {error.code}") from error
+            if error.code in (400, 404):
+                return None
+            if error.code in (401, 403):
+                raise RuntimeError(
+                    "IPinfo rejected the API token. Verify the IPINFO_TOKEN repository secret."
+                ) from error
             if error.code != 429 and not 500 <= error.code < 600:
                 raise RuntimeError(f"IPinfo lookup failed for {address}: HTTP {error.code}") from error
         except (URLError, TimeoutError) as error:
