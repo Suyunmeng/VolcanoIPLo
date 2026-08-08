@@ -12,7 +12,7 @@ import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import DefaultDict, Iterable
+from typing import DefaultDict, Iterable, Sequence
 
 import requests
 
@@ -23,6 +23,8 @@ MAX_ATTEMPTS = 6
 LOOKUP_WORKERS = 64
 RETRY_DELAY_CAP_SECONDS = 30
 SESSION_LOCAL = threading.local()
+TOKEN_LOCK = threading.Lock()
+EXHAUSTED_TOKENS: set[str] = set()
 IPV4_LOOKUP_PREFIX = 24
 IPV6_LOOKUP_PREFIX = 48
 INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -31,17 +33,36 @@ WHITESPACE = re.compile(r'\s+')
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Classify IPv4 and IPv6 CIDRs into city-specific text files."
+        description="Classify CIDR ranges by mainland city using the IPinfo API."
     )
     parser.add_argument("--input", required=True, type=Path, help="Input CIDR list")
-    parser.add_argument("--token", required=True, help="IPinfo API token")
+    parser.add_argument("--token", required=True, help="Comma-separated IPinfo API tokens")
     parser.add_argument("--output-dir", required=True, type=Path, help="Output directory")
     return parser.parse_args()
 
 
+def parse_tokens(value: str) -> tuple[str, ...]:
+    tokens = tuple(dict.fromkeys(token.strip() for token in value.split(",") if token.strip()))
+    if not tokens:
+        raise ValueError("IPinfo API token list must not be empty")
+    return tokens
+
+
+def next_token(tokens: Sequence[str]) -> str:
+    with TOKEN_LOCK:
+        for token in tokens:
+            if token not in EXHAUSTED_TOKENS:
+                return token
+    raise RuntimeError("All IPinfo API tokens have been rate-limited.")
+
+
+def mark_token_exhausted(token: str) -> None:
+    with TOKEN_LOCK:
+        EXHAUSTED_TOKENS.add(token)
+
+
 def city_name(response: dict[str, object]) -> str | None:
-    country = response.get("country")
-    if country != "CN":
+    if response.get("country") != "CN":
         return None
 
     geo = response.get("geo")
@@ -73,40 +94,52 @@ def session() -> requests.Session:
     return current
 
 
-def lookup_city(address: ipaddress.IPv4Address | ipaddress.IPv6Address, token: str) -> str | None:
+def lookup_city(address: ipaddress.IPv4Address | ipaddress.IPv6Address, tokens: Sequence[str]) -> str | None:
     url = f"{IPINFO_LOOKUP_URL}{address}/json"
-    headers = {"Authorization": f"Bearer {token}"}
+    token: str | None = None
+    transient_attempt = 0
 
-    for attempt in range(MAX_ATTEMPTS):
+    while True:
+        if token is None:
+            token = next_token(tokens)
+
         response: requests.Response | None = None
         try:
-            response = session().get(url, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
+            response = session().get(
+                url,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
             if response.status_code in (400, 404):
                 return None
             if response.status_code in (401, 403):
                 raise RuntimeError(
-                    "IPinfo rejected the API token. Verify the IPINFO_TOKEN repository secret."
+                    "IPinfo rejected an API token. Verify the IPINFO_TOKEN repository secret."
                 )
-            if response.status_code != 429 and not 500 <= response.status_code < 600:
+            if response.status_code == 429:
+                mark_token_exhausted(token)
+                token = None
+                continue
+            if response.status_code >= 500:
                 response.raise_for_status()
-            if response.status_code < 400:
-                payload = response.json()
-                if not isinstance(payload, dict):
-                    raise RuntimeError("IPinfo returned a non-object JSON response")
-                return city_name(payload)
-            last_error: Exception = RuntimeError(f"HTTP {response.status_code}")
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise RuntimeError("IPinfo returned a non-object JSON response")
+            return city_name(payload)
         except requests.HTTPError as error:
-            raise RuntimeError(
-                f"IPinfo lookup failed for {address}: HTTP {error.response.status_code}"
-            ) from error
+            if error.response is None or error.response.status_code < 500:
+                raise RuntimeError(
+                    f"IPinfo lookup failed for {address}: HTTP {error.response.status_code}"
+                ) from error
+            last_error: Exception = error
         except (requests.ConnectionError, requests.Timeout, requests.JSONDecodeError) as error:
             last_error = error
 
-        if attempt == MAX_ATTEMPTS - 1:
+        transient_attempt += 1
+        if transient_attempt == MAX_ATTEMPTS:
             raise RuntimeError(f"IPinfo lookup failed for {address}: {last_error}") from last_error
-        time.sleep(retry_delay(response, attempt))
-
-    raise AssertionError("unreachable")
+        time.sleep(retry_delay(response, transient_attempt - 1))
 
 
 def sampled_address(network: ipaddress.IPv4Network | ipaddress.IPv6Network) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
@@ -116,9 +149,9 @@ def sampled_address(network: ipaddress.IPv4Network | ipaddress.IPv6Network) -> i
 
 
 def lookup_region(
-    network: ipaddress.IPv4Network | ipaddress.IPv6Network, token: str
+    network: ipaddress.IPv4Network | ipaddress.IPv6Network, tokens: Sequence[str]
 ) -> str | None:
-    return lookup_city(sampled_address(network), token)
+    return lookup_city(sampled_address(network), tokens)
 
 
 def read_networks(input_path: Path) -> Iterable[ipaddress.IPv4Network | ipaddress.IPv6Network]:
@@ -156,7 +189,7 @@ def collapse_networks(
 
 
 def classify(
-    networks: Iterable[ipaddress.IPv4Network | ipaddress.IPv6Network], token: str
+    networks: Iterable[ipaddress.IPv4Network | ipaddress.IPv6Network], tokens: Sequence[str]
 ) -> tuple[DefaultDict[str, set[str]], DefaultDict[str, set[str]]]:
     subnetworks = sorted(
         {subnetwork for network in networks for subnetwork in split_network(network)},
@@ -164,7 +197,7 @@ def classify(
     )
 
     with ThreadPoolExecutor(max_workers=LOOKUP_WORKERS) as executor:
-        locations = list(executor.map(lambda network: lookup_region(network, token), subnetworks))
+        locations = list(executor.map(lambda network: lookup_region(network, tokens), subnetworks))
 
     ipv4_by_location: DefaultDict[str, list[ipaddress.IPv4Network]] = defaultdict(list)
     ipv6_by_location: DefaultDict[str, list[ipaddress.IPv6Network]] = defaultdict(list)
@@ -235,11 +268,14 @@ def main() -> int:
     if not args.input.is_file():
         print(f"Input file not found: {args.input}", file=sys.stderr)
         return 1
-    if not args.token:
-        print("IPinfo API token must not be empty.", file=sys.stderr)
+
+    try:
+        tokens = parse_tokens(args.token)
+    except ValueError as error:
+        print(error, file=sys.stderr)
         return 1
 
-    ipv4_by_city, ipv6_by_city = classify(read_networks(args.input), args.token)
+    ipv4_by_city, ipv6_by_city = classify(read_networks(args.input), tokens)
     write_output(args.output_dir, ipv4_by_city, ipv6_by_city)
     print(f"Wrote {len(set(ipv4_by_city) | set(ipv6_by_city))} location groups.")
     return 0
