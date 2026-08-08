@@ -1,4 +1,4 @@
-name: Update Volcano Engine IP lists
+name: Update China cloud IP lists
 
 on:
   push:
@@ -15,7 +15,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: update-volcano-engine-ip-lists
+  group: update-china-cloud-ip-lists
   cancel-in-progress: false
 
 jobs:
@@ -43,21 +43,28 @@ jobs:
           IPINFO_TOKEN: ${{ secrets.IPINFO_TOKEN }}
         run: test -n "$IPINFO_TOKEN"
 
-      - name: Download Volcano Engine IP ranges
+      - name: Download IP ranges
         run: |
           curl --fail --location --retry 3 --retry-all-errors \
-            --output "$RUNNER_TEMP/volcanoengine46.txt" \
+            --output "$RUNNER_TEMP/volcanoenginecn46.txt" \
             https://github.com/Suyunmeng/china-operator-ip/raw/refs/heads/ip-lists/volcanoenginecn46.txt
+          curl --fail --location --retry 3 --retry-all-errors \
+            --output "$RUNNER_TEMP/ucloudcn46.txt" \
+            https://raw.githubusercontent.com/Suyunmeng/china-operator-ip/refs/heads/ip-lists/ucloudcn46.txt
 
-      - name: Generate city IP lists by sampled subnet
+      - name: Generate city IP lists
         env:
           IPINFO_TOKEN: ${{ secrets.IPINFO_TOKEN }}
         run: |
           rm -rf "$RUNNER_TEMP/ip-list"
           python scripts/classify_ips.py \
-            --input "$RUNNER_TEMP/volcanoengine46.txt" \
+            --input "$RUNNER_TEMP/volcanoenginecn46.txt" \
             --token "$IPINFO_TOKEN" \
-            --output-dir "$RUNNER_TEMP/ip-list"
+            --output-dir "$RUNNER_TEMP/ip-list/VolcanoEngine-CN"
+          python scripts/classify_ips.py \
+            --input "$RUNNER_TEMP/ucloudcn46.txt" \
+            --token "$IPINFO_TOKEN" \
+            --output-dir "$RUNNER_TEMP/ip-list/UCloud-CN"
 
       - name: Publish changed lists
         env:
@@ -71,13 +78,10 @@ jobs:
             git rm -rf . >/dev/null 2>&1 || true
           fi
 
-          shopt -s nullglob
-          for file in *-4.txt *-6.txt *-46.txt; do
-            rm -f -- "$file"
-          done
-          cp "$RUNNER_TEMP"/ip-list/*.txt .
+          git rm -rf -- . >/dev/null 2>&1 || true
+          cp -R "$RUNNER_TEMP"/ip-list/. .
 
-          git add --all -- '*.txt'
+          git add --all -- .
           if git diff --cached --quiet; then
             echo "No IP-list changes to publish."
             exit 0
@@ -85,5 +89,5 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "chore: update Volcano Engine city IP lists"
+          git commit -m "chore: update China cloud city IP lists"
           git push --force origin "$TARGET_BRANCH"
