@@ -47,7 +47,7 @@ jobs:
         run: |
           curl --fail --location --retry 3 --retry-all-errors \
             --output "$RUNNER_TEMP/volcanoengine46.txt" \
-            https://github.com/Suyunmeng/china-operator-ip/raw/refs/heads/ip-lists/volcanoengine46.txt
+            https://github.com/Suyunmeng/china-operator-ip/raw/refs/heads/ip-lists/volcanoenginecn46.txt
 
       - name: Generate city IP lists by sampled subnet
         env:
