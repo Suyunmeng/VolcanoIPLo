@@ -26,7 +26,6 @@ SESSION_LOCAL = threading.local()
 TOKEN_LOCK = threading.Lock()
 EXHAUSTED_TOKENS: set[str] = set()
 IPV4_LOOKUP_PREFIX = 24
-IPV6_LOOKUP_PREFIX = 48
 INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 WHITESPACE = re.compile(r'\s+')
 
@@ -175,11 +174,10 @@ def file_stem(location: str) -> str:
 def split_network(
     network: ipaddress.IPv4Network | ipaddress.IPv6Network,
 ) -> Iterable[ipaddress.IPv4Network | ipaddress.IPv6Network]:
-    lookup_prefix = IPV4_LOOKUP_PREFIX if network.version == 4 else IPV6_LOOKUP_PREFIX
-    if network.prefixlen >= lookup_prefix:
+    if network.version == 6 or network.prefixlen >= IPV4_LOOKUP_PREFIX:
         yield network
         return
-    yield from network.subnets(new_prefix=lookup_prefix)
+    yield from network.subnets(new_prefix=IPV4_LOOKUP_PREFIX)
 
 
 def collapse_networks(
