@@ -51,6 +51,24 @@ jobs:
           curl --fail --location --retry 3 --retry-all-errors \
             --output "$RUNNER_TEMP/ucloudcn46.txt" \
             https://raw.githubusercontent.com/Suyunmeng/china-operator-ip/refs/heads/ip-lists/ucloudcn46.txt
+          curl --fail --location --retry 3 --retry-all-errors \
+            --output "$RUNNER_TEMP/bgpgdcn46.txt" \
+            https://github.com/Suyunmeng/china-operator-ip/raw/refs/heads/ip-lists/bgpgdcn46.txt
+          curl --fail --location --retry 3 --retry-all-errors \
+            --output "$RUNNER_TEMP/ytnetcn46.txt" \
+            https://github.com/Suyunmeng/china-operator-ip/raw/refs/heads/ip-lists/ytnetcn46.txt
+          curl --fail --location --retry 3 --retry-all-errors \
+            --output "$RUNNER_TEMP/halocloudcn46.txt" \
+            https://github.com/Suyunmeng/china-operator-ip/raw/refs/heads/ip-lists/halocloudcn46.txt
+          curl --fail --location --retry 3 --retry-all-errors \
+            --output "$RUNNER_TEMP/heptaskycn46.txt" \
+            https://github.com/Suyunmeng/china-operator-ip/raw/refs/heads/ip-lists/heptaskycn46.txt
+          curl --fail --location --retry 3 --retry-all-errors \
+            --output "$RUNNER_TEMP/owocloudcn46.txt" \
+            https://raw.githubusercontent.com/Suyunmeng/china-operator-ip/refs/heads/ip-lists/owocloudcn46.txt
+          curl --fail --location --retry 3 --retry-all-errors \
+            --output "$RUNNER_TEMP/sparkvmcn46.txt" \
+            https://raw.githubusercontent.com/Suyunmeng/china-operator-ip/refs/heads/ip-lists/sparkvmcn46.txt
 
       - name: Generate city IP lists
         env:
@@ -65,6 +83,30 @@ jobs:
             --input "$RUNNER_TEMP/ucloudcn46.txt" \
             --token "$IPINFO_TOKEN" \
             --output-dir "$RUNNER_TEMP/ip-list/UCloud-CN"
+          python scripts/classify_ips.py \
+            --input "$RUNNER_TEMP/bgpgdcn46.txt" \
+            --token "$IPINFO_TOKEN" \
+            --output-dir "$RUNNER_TEMP/ip-list/BGP.GD-CN"
+          python scripts/classify_ips.py \
+            --input "$RUNNER_TEMP/ytnetcn46.txt" \
+            --token "$IPINFO_TOKEN" \
+            --output-dir "$RUNNER_TEMP/ip-list/YT.NET-CN"
+          python scripts/classify_ips.py \
+            --input "$RUNNER_TEMP/halocloudcn46.txt" \
+            --token "$IPINFO_TOKEN" \
+            --output-dir "$RUNNER_TEMP/ip-list/HaloCloud-CN"
+          python scripts/classify_ips.py \
+            --input "$RUNNER_TEMP/heptaskycn46.txt" \
+            --token "$IPINFO_TOKEN" \
+            --output-dir "$RUNNER_TEMP/ip-list/Heptasky-CN"
+          python scripts/classify_ips.py \
+            --input "$RUNNER_TEMP/owocloudcn46.txt" \
+            --token "$IPINFO_TOKEN" \
+            --output-dir "$RUNNER_TEMP/ip-list/OwOCloud-CN"
+          python scripts/classify_ips.py \
+            --input "$RUNNER_TEMP/sparkvmcn46.txt" \
+            --token "$IPINFO_TOKEN" \
+            --output-dir "$RUNNER_TEMP/ip-list/SparkVM-CN"
 
       - name: Publish changed lists
         env:
